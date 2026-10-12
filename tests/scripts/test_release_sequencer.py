@@ -6,6 +6,7 @@ it; already-resolvable older green claims still make progress.
 """
 import hashlib
 import json
+import subprocess
 
 import pytest
 from datetime import UTC
@@ -393,11 +394,16 @@ def test_two_outstanding_attempts_are_refused_across_versions():
 
 
 def _sequencer_fixture(*versions, manifest_digest, docker_digest="sha256:" + "b" * 64,
-                       drafts_on_claim_tag=False, skip_bundles=False):
-    """Two green claims with their final tags; releases start as drafts."""
+                       drafts_on_claim_tag=False, skip_bundles=False, final_tags=True):
+    """Two green claims with their final tags; releases start as drafts.
+
+    final_tags=False is a fresh green claim: no receipt tag yet, the draft on
+    the attempt ref, and one successful Stable Release run.
+    """
     commit = "a" * 40
     tags = {}
     releases = []
+    workflow_runs = []
     for index, version in enumerate(versions, start=1):
         claim_tag, tag = f"rc.1-v{version}", f"v{version}"
         claim_object, final_object = str(index) * 40, str(index + 2) * 40
@@ -416,9 +422,14 @@ def _sequencer_fixture(*versions, manifest_digest, docker_digest="sha256:" + "b"
             "archive": f"releases/tag/{claim_tag}/",
         }
         tags[claim_tag] = (claim_object, commit, claim)
-        tags[tag] = (final_object, commit, final)
+        if final_tags:
+            tags[tag] = (final_object, commit, final)
+        else:
+            workflow_runs.append({"id": 100 + index, "run_attempt": 1, "status": "completed",
+                                  "conclusion": "success", "head_branch": claim_tag,
+                                  "head_sha": commit})
         releases.append({
-            "id": index, "tag_name": claim_tag if drafts_on_claim_tag else tag,
+            "id": index, "tag_name": claim_tag if drafts_on_claim_tag or not final_tags else tag,
             "draft": True, "prerelease": False, "published_at": None,
             "body": "notes",
         })
@@ -444,7 +455,10 @@ def _sequencer_fixture(*versions, manifest_digest, docker_digest="sha256:" + "b"
                         lines[-1] = f"{target}\t{ref}"
             return "\n".join(lines)
         if argv[:2] == ["git", "rev-parse"]:
-            return tags[argv[-1].removeprefix("refs/tags/")][0]
+            name = argv[-1].removeprefix("refs/tags/")
+            if name not in tags:
+                raise subprocess.CalledProcessError(128, argv)
+            return tags[name][0]
         if argv[:3] == ["git", "cat-file", "-t"]:
             return "tag"
         if argv[:3] == ["git", "cat-file", "-p"]:
@@ -455,7 +469,9 @@ def _sequencer_fixture(*versions, manifest_digest, docker_digest="sha256:" + "b"
             return json.dumps(tags[argv[3]][2])
         if "tag" in argv and "-a" in argv:
             tag = argv[argv.index("-a") + 1]
-            tags[tag] = (str(len(tags)) * 40, tags[claim_tag][1], tags[tag][2])
+            message = (tags[tag][2] if tag in tags
+                       else json.loads(argv[argv.index("-m") + 1]))
+            tags[tag] = (str(len(tags)) * 40, argv[argv.index("-a") + 2], message)
             return ""
         if argv[0] == "git" and "push" in argv:
             return ""
@@ -464,7 +480,7 @@ def _sequencer_fixture(*versions, manifest_digest, docker_digest="sha256:" + "b"
         if argv[:4] == ["gh", "api", "--paginate", "--slurp"]:
             if "/releases?" in argv[-1]:
                 return json.dumps([releases])
-            return json.dumps([{"workflow_runs": []}])
+            return json.dumps([{"workflow_runs": workflow_runs}])
         if argv[:3] == ["gh", "api", "--method"]:
             release = next(row for row in releases if row["id"] == int(argv[4].rsplit("/", 1)[1]))
             for _flag, value in zip(argv[5::2], argv[6::2]):
@@ -525,6 +541,42 @@ def test_reconcile_discovers_custody_flips_then_advances_oldest_first():
     ]
     for release, version in zip(releases, ("0.21.5", "0.21.6")):
         assert release["tag_name"] == f"v{version}" and release["draft"] is False
+
+
+def test_a_fresh_flip_advances_the_head_with_the_receipt_it_just_wrote():
+    """The normal publish: no receipt tag when discover() runs, flip and advance in one pass.
+
+    discover() records no receipt digests for a claim without its final tag, so
+    the advance must see the ones publish_attempt() just wrote. Otherwise the
+    channel advance compares the archive digest against None and every
+    first-pass publish fails after making the release public (0.21.7).
+    """
+    from scripts.releases.sequencer import reconcile
+
+    manifest_digest = hashlib.sha256(b"m").hexdigest()
+    docker_digest = "sha256:" + "c" * 64
+    tags, releases, run = _sequencer_fixture(
+        "0.21.5", manifest_digest=manifest_digest, docker_digest=docker_digest, final_tags=False)
+    assert "v0.21.5" not in tags
+    head = ["0.21.4"]
+    advanced = []
+
+    def advance(record):
+        advanced.append({key: record[key] for key in (
+            "tag", "candidate_manifest_sha256", "docker_manifest_digest")})
+        head[0] = record["version"]
+
+    steps = reconcile(
+        {"GITHUB_REPOSITORY": "example/project", "REQUESTED_VERSION": "0.21.5"},
+        run=run, read_head=lambda: head[0], advance_head=advance,
+        read_archive=lambda _key: b"m",
+    )
+
+    assert steps == [{"flip": "0.21.5"}, {"advance": "0.21.5"}]
+    assert advanced == [{"tag": "v0.21.5", "candidate_manifest_sha256": manifest_digest,
+                         "docker_manifest_digest": docker_digest}]
+    assert tags["v0.21.5"][2]["candidateManifestSha256"] == manifest_digest
+    assert releases[0]["tag_name"] == "v0.21.5" and releases[0]["draft"] is False
 
 
 def test_the_store_check_joins_the_pass_after_the_aliases_move(monkeypatch):

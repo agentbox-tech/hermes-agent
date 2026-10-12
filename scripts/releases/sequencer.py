@@ -401,8 +401,10 @@ def reconcile(env: dict, *, run=output, read_head=None, advance_head=None,
     for step in steps:
         if "flip" in step:
             record = by_version[step["flip"]]
-            record["docker_manifest_digest"] = stable.publish_attempt(
-                record, repository=repository, run=run, read_archive=read_archive)
+            # discover() ran before the receipt tag existed, so the record has no
+            # receipt digests yet; the advance below must check the ones just written.
+            record.update(stable.publish_attempt(
+                record, repository=repository, run=run, read_archive=read_archive))
         else:
             advance_head(by_version[step["advance"]])
 

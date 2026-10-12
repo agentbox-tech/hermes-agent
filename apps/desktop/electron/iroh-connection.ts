@@ -47,11 +47,21 @@ export function isIrohUrl(value: unknown): boolean {
 
 /** Extract the base32 ticket from a saved url or pasted ticket string. */
 export function parseIrohTicket(value: unknown): string {
-  const raw = String(value ?? '').trim()
+  // JS trim() leaves zero-width chars (BOM, ZWSP, word-joiner) in place —
+  // strip them from the edges FIRST so scheme detection below can't be
+  // defeated by a ZWSP in front of "iroh://" (which would otherwise fold the
+  // scheme letters — valid base32 — into the ticket silently).
+  const raw = String(value ?? '').replace(/^[\s\u200b-\u200d\u2060\ufeff]+|[\s\u200b-\u200d\u2060\ufeff]+$/gi, '')
 
   const ticket = raw.toLowerCase().startsWith(IROH_SCHEME) ? raw.slice(IROH_SCHEME.length) : raw
 
-  if (!ticket) {
+  // Closed-set sanitize: valid tickets contain ONLY RFC4648 base32 lowercase
+  // ([a-z2-7]), so stripping everything else is lossless for real tickets and
+  // immune to paste noise (zero-width spaces, soft breaks, trailing colons,
+  // smart-quote bytes) that macOS/clipboard paths inject into long strings.
+  const clean = ticket.replace(/[^a-z2-7]/g, '')
+
+  if (!clean) {
     throw new Error('iroh connections need a ticket (the "endpoint…" string from the remote box).')
   }
 
@@ -61,14 +71,14 @@ export function parseIrohTicket(value: unknown): string {
   // ("...not installed on this platform") looks identical to a bad ticket
   // from the outside and must be distinguishable in the error toast.
   try {
-    binding().EndpointTicket.fromString(ticket)
+    binding().EndpointTicket.fromString(clean)
   } catch (err: any) {
     const reason = String(err?.message ?? err).replace(/^Error:\s*/i, '')
 
-    throw new Error(`Not a valid iroh ticket: "${ticket.slice(0, 24)}…" (${reason})`)
+    throw new Error(`Not a valid iroh ticket: "${clean.slice(0, 24)}…" (${reason})`)
   }
 
-  return ticket
+  return clean
 }
 
 /** Canonical saved form for a remote connection backed by iroh. */

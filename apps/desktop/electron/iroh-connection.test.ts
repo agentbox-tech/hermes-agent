@@ -40,6 +40,14 @@ describe('parseIrohTicket', () => {
     assert.equal(parseIrohTicket(`${IROH_SCHEME}${TICKET}`), TICKET)
   })
 
+  it('is immune to paste noise (zero-width spaces, breaks, stray colons)', () => {
+    // Long tickets copied from chat apps routinely pick up invisible unicode;
+    // the closed-set sanitizer must strip them and parse the real ticket.
+    const noisy = ` \u200B\uFEFF${IROH_SCHEME}\u200b${TICKET}\u2028:8642\n `
+
+    assert.equal(parseIrohTicket(noisy), TICKET)
+  })
+
   it('rejects empty and malformed tickets', () => {
     assert.throws(() => parseIrohTicket(''), /need a ticket/)
     assert.throws(() => parseIrohTicket(`${IROH_SCHEME}!!!not-base32!!!`), /valid iroh ticket/)

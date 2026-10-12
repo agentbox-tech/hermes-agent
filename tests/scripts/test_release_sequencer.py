@@ -434,6 +434,20 @@ def _sequencer_fixture(*versions, manifest_digest, docker_digest="sha256:" + "b"
             "body": "notes",
         })
 
+    def rev_parse(argv):
+        # git fails for a tag that does not exist (a fresh claim has no receipt yet).
+        name = argv[-1].removeprefix("refs/tags/")
+        if name not in tags:
+            raise subprocess.CalledProcessError(128, argv)
+        return tags[name][0]
+
+    def create_tag(argv):
+        # A new receipt records the message the code wrote; a repeated one keeps its own.
+        tag = argv[argv.index("-a") + 1]
+        message = tags[tag][2] if tag in tags else json.loads(argv[argv.index("-m") + 1])
+        tags[tag] = (str(len(tags)) * 40, argv[argv.index("-a") + 2], message)
+        return ""
+
     def run(argv):
         if argv[:2] == ["git", "fetch"]:
             return ""
@@ -455,10 +469,7 @@ def _sequencer_fixture(*versions, manifest_digest, docker_digest="sha256:" + "b"
                         lines[-1] = f"{target}\t{ref}"
             return "\n".join(lines)
         if argv[:2] == ["git", "rev-parse"]:
-            name = argv[-1].removeprefix("refs/tags/")
-            if name not in tags:
-                raise subprocess.CalledProcessError(128, argv)
-            return tags[name][0]
+            return rev_parse(argv)
         if argv[:3] == ["git", "cat-file", "-t"]:
             return "tag"
         if argv[:3] == ["git", "cat-file", "-p"]:
@@ -468,11 +479,7 @@ def _sequencer_fixture(*versions, manifest_digest, docker_digest="sha256:" + "b"
         if argv[:3] == ["git", "tag", "-l"]:
             return json.dumps(tags[argv[3]][2])
         if "tag" in argv and "-a" in argv:
-            tag = argv[argv.index("-a") + 1]
-            message = (tags[tag][2] if tag in tags
-                       else json.loads(argv[argv.index("-m") + 1]))
-            tags[tag] = (str(len(tags)) * 40, argv[argv.index("-a") + 2], message)
-            return ""
+            return create_tag(argv)
         if argv[0] == "git" and "push" in argv:
             return ""
         if argv[:3] == ["docker", "buildx", "imagetools"]:

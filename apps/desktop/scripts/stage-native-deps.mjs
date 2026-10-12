@@ -727,6 +727,108 @@ export function stageGetWindows(
   return stageGetWindowsInto(srcRoot, destRoot, { platform, arch, install })
 }
 
+// ─── @number0/iroh (iroh:// remote transport) ────────────────────────
+//
+// Staged like node-pty/get-windows: external to the esbuild bundle, resolved
+// at runtime from dist/node_modules (asarUnpacked via `dist/**`).
+//
+// The published umbrella package declares `main: "iroh-js/index.js"` but
+// ships its files at the package ROOT — bare node papers over the broken
+// entry with the deprecated DEP0128 fallback, packaged Electron takes `main`
+// literally and dies with MODULE_NOT_FOUND. The stager repairs the entry
+// metadata in the STAGED copy (upstream untouched) and lands the target's
+// napi binary beside index.js, so the loader's first candidate
+// (`require('./iroh.<target>.node')`) hits without any bare resolution.
+// napi binaries are ABI-stable — no electron-rebuild needed.
+
+/**
+ * Stage the @number0/iroh umbrella package + native bindings into `destRoot`.
+ * Pure over `bindingDirs` so tests can supply fake trees without npm.
+ */
+export function stageIrohInto(srcRoot, destRoot, { platform = process.platform, arch = process.arch, nativeHost = platform === process.platform && arch === process.arch, bindingDirs = [] } = {}) {
+  removeDirSync(destRoot)
+  mkdirSync(destRoot, { recursive: true })
+
+  // package.json — repair the entry, but only when the declared entry is
+  // actually missing, so a fixed upstream release stages unchanged.
+  const pkg = JSON.parse(readFileSync(join(srcRoot, 'package.json'), 'utf8'))
+  const declaredMain = (pkg.main ?? '').replace(/^\.\//, '')
+  if (!declaredMain || !existsSync(join(srcRoot, declaredMain))) {
+    pkg.main = './index.js'
+    if (pkg.types) pkg.types = './index.d.ts'
+  }
+  writeFileSync(join(destRoot, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+
+  if (!existsSync(join(srcRoot, 'index.js'))) {
+    throw new Error(`[stage-native-deps] @number0/iroh has no root index.js to stage (${srcRoot})`)
+  }
+  copyFileSync(join(srcRoot, 'index.js'), join(destRoot, 'index.js'))
+  if (existsSync(join(srcRoot, 'index.d.ts'))) {
+    copyFileSync(join(srcRoot, 'index.d.ts'), join(destRoot, 'index.d.ts'))
+  }
+
+  let binaries = 0
+  for (const dir of bindingDirs) {
+    for (const name of readdirSafe(dir)) {
+      if (!name.endsWith('.node')) continue
+      const destFile = join(destRoot, name)
+      copyFileSync(join(dir, name), destFile)
+      const classified = classifyNativeBinary(destFile)
+      if (classified !== platform) {
+        throw new Error(
+          `[stage-native-deps] @number0/iroh binding ${name}: ` +
+            `expected ${platform}, got ${classified ?? 'unknown'}. ` +
+            'Refusing to stage a binary compiled for the wrong platform.'
+        )
+      }
+      binaries++
+    }
+  }
+  if (binaries === 0 && nativeHost) {
+    // iroh:// remotes are a headline feature: a same-host build without the
+    // binding means a broken install, not a cross-target limitation — fail.
+    throw new Error(
+      `[stage-native-deps] no @number0/iroh native binding for ${platform}-${arch} ` +
+        'and this host could provide one — run `npm install` before packaging.'
+    )
+  }
+  console.log(`[stage-native-deps] staged @number0/iroh (${binaries} native binding(s)) -> ${destRoot}`)
+  return destRoot
+}
+
+export function stageIroh({
+  platform = process.platform,
+  arch = process.arch,
+  source = resolve(projectRoot, '../..'),
+  out = join(source, 'apps/desktop/dist/node_modules')
+} = {}) {
+  const appRoot = join(source, 'apps/desktop')
+  let umbrella
+  try {
+    umbrella = dirname(require.resolve('@number0/iroh/package.json', { paths: [appRoot] }))
+  } catch (error) {
+    // Required dependency (not optional like get-windows): shipping without
+    // it silently disables iroh:// remotes — the failure we are fixing.
+    throw new Error(
+      `[stage-native-deps] @number0/iroh is not installed (required for iroh:// remotes): ` +
+        `${error instanceof Error ? error.message : error}`
+    )
+  }
+  // npm installs the napi platform package matching the host; stage every
+  // sibling that targets this platform/arch (arch-specific and universal).
+  const siblings = dirname(umbrella)
+  const pattern = new RegExp(`^iroh-${platform}-(universal|${arch})([-_].*)?$`)
+  const bindingDirs = readdirSync(siblings, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && pattern.test(entry.name))
+    .map(entry => join(siblings, entry.name))
+    .filter(dir => readdirSafe(dir).some(name => name.endsWith('.node')))
+  return stageIrohInto(umbrella, join(out, '@number0', 'iroh'), {
+    platform,
+    nativeHost: platform === process.platform && arch === process.arch,
+    bindingDirs
+  })
+}
+
 /**
  * Whether ``out`` holds every native piece a build on THIS host can stage for the target.
  * Cross-target packs never build helpers and win32-arm64 has no get-windows prebuild, so neither
@@ -735,11 +837,14 @@ export function stageGetWindows(
  */
 export function nativeTreeComplete(out, platform, arch) {
   const native = platform === process.platform && (platform !== 'linux' || arch === process.arch)
-  const required = ['get-windows/lib/windows.js']
+  const required = ['get-windows/lib/windows.js', '@number0/iroh/index.js']
   if (platform === 'darwin') required.push('get-windows/main')
   if (platform === 'win32' && arch !== 'arm64') required.push('get-windows/lib/binding')
   if (native && ['darwin', 'linux', 'win32'].includes(platform)) {
     required.push(hudModifierBinaryRelativePath(platform, arch))
+    // An umbrella without a staged napi binary loads fine and dies on the
+    // first dial — the exact failure this stager exists to prevent.
+    if (!readdirSafe(join(out, '@number0', 'iroh')).some(name => name.endsWith('.node'))) return false
   }
   return required.every(relative => existsSync(join(out, relative))) && nodePtyComplete(join(out, 'node-pty'), platform)
 }
@@ -768,6 +873,7 @@ export async function prepareDesktopNativeDependencies({ source, out, platform =
   await withProduct(out, async product => {
     stageNodePty({ source, out: product, platform, arch })
     stageGetWindows({ source, out: product, platform, arch })
+    stageIroh({ source, out: product, platform, arch })
     buildCommandScreenshotMonitor({ source, distDir: product, platform })
     buildHudModifierMonitor({ source, distDir: product, platform, arch })
   }, { source })

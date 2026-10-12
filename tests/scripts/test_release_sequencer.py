@@ -677,3 +677,66 @@ def test_a_release_that_skipped_bundles_ships_only_its_tag_release_and_docker_al
     # receipt digest, so the next pass has nothing left to advance.
     assert sequencer.reconcile(env, run=run, read_archive=no_archive) == []
     assert events == [("aliases", "rc.1-v0.21.5")]
+
+
+def test_the_sequencer_narrates_every_phase_on_stderr_and_keeps_stdout_json(capsys):
+    """Discovery, each claim's state and why, the plan, every step and every command."""
+    from scripts.releases.sequencer import reconcile
+
+    manifest_digest = hashlib.sha256(b"m").hexdigest()
+    _tags, _releases, run = _sequencer_fixture(
+        "0.21.5", manifest_digest=manifest_digest, final_tags=False)
+    head = ["0.21.4"]
+
+    def advance(record):
+        head[0] = record["version"]
+
+    reconcile({"GITHUB_REPOSITORY": "example/project", "REQUESTED_VERSION": "0.21.5"},
+              run=run, read_head=lambda: head[0], advance_head=advance,
+              read_archive=lambda _key: b"m")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    err = captured.err
+    for expected in (
+        "Stable sequencer: repository=example/project requested=0.21.5",
+        "::group::Discover stable claims",
+        "rc.1-v0.21.5 @ aaaaaaaaaa: GREEN — run 101 attempt 1 completed/success; draft on rc.1-v0.21.5",
+        "Channel head: 0.21.4",
+        "plan 0.21.5: green — publish then advance (requested)",
+        "Steps: flip 0.21.5, advance 0.21.5",
+        "[1/2] Publish 0.21.5",
+        f"Receipt v0.21.5: manifest {manifest_digest}",
+        "::notice title=Stable sequencer::v0.21.5 is public",
+        "[2/2] Advance channels to 0.21.5",
+        "Channel head after the pass: 0.21.5 (planned 0.21.5)",
+        "Stable sequencer finished: flip 0.21.5, advance 0.21.5",
+        "  $ git push origin refs/tags/v0.21.5",
+    ):
+        assert expected in err, expected
+    assert err.count("::group::") == err.count("::endgroup::")
+
+
+def test_a_held_claim_says_why_it_was_held(capsys):
+    from scripts.releases.sequencer import plan
+
+    plan([{"version": "0.21.5", "state": "green", "autopublish": False}], head="0.21.4")
+    assert "plan 0.21.5: green but held" in capsys.readouterr().err
+
+
+def test_main_prints_only_the_steps_on_stdout_and_annotates_a_failure(monkeypatch, capsys):
+    from scripts.releases import sequencer
+
+    monkeypatch.setattr(sequencer, "reconcile", lambda env: [{"advance": "0.21.5"}])
+    sequencer.main([], {})
+    assert json.loads(capsys.readouterr().out) == [{"advance": "0.21.5"}]
+
+    def boom(env):
+        raise ValueError("Stable protected head did not reach the planned version")
+
+    monkeypatch.setattr(sequencer, "reconcile", boom)
+    with pytest.raises(ValueError):
+        sequencer.main([], {})
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert ("::error title=Stable sequencer failed::ValueError: "
+            "Stable protected head did not reach the planned version") in captured.err

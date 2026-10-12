@@ -335,6 +335,7 @@ import { buildHudWindowUrl } from './hud-url'
 import { linuxOzoneBackend, resolveHudWindowing } from './hud-windowing'
 import { INSTALL_STAMP, installShape } from './install-stamp'
 import type { InstallStamp } from './install-stamp'
+import { createIrohTunnelManager, isIrohUrl, parseIrohTicket } from './iroh-connection'
 import { applyLaunchProfileOverride } from './launch-profile'
 import { fetchLinkTitle, resolveFaviconCached } from './link-metadata'
 import { CHROMIUM_LOG_FILENAME, enableLinuxCrashDiagnostics, linuxCrashDiagnostics } from './linux-crash-diagnostics'
@@ -9565,12 +9566,27 @@ async function buildRemoteConnection(
   remoteIdentity?,
   headers?
 ) {
-  const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+  // iroh remotes: dial the saved ticket through the native transport first and
+  // hand everything downstream the live loopback tunnel. From here on the
+  // connection is indistinguishable from a plain url remote — fetch, WS
+  // upgrade, token adoption and revalidation all ride the pipe unaware.
+  let dialedUrl = rawUrl
+  let dialedKind = remoteKind
+  let irohHostLabel = ''
+
+  if (isIrohUrl(String(rawUrl || ''))) {
+    const tunnel = await irohTunnels.ensure(String(rawUrl))
+    dialedUrl = tunnel.baseUrl
+    dialedKind = 'iroh'
+    irohHostLabel = `iroh:${parseIrohTicket(rawUrl).slice(0, 8)}`
+  }
+
+  const baseUrl = normalizeRemoteBaseUrl(dialedUrl)
   const remoteHeaders = decryptRemoteHeaders(headers)
   // For token/oauth remotes the meaningful host is the real backend URL; for
   // SSH remotes the caller passes the entered/resolved host explicitly (the
   // baseUrl is a 127.0.0.1 tunnel and would be useless in the pill).
-  const host = remoteHost || hostLabelFromBaseUrl(baseUrl)
+  const host = remoteHost || irohHostLabel || hostLabelFromBaseUrl(baseUrl)
 
   if (authMode === 'oauth') {
     const ticket = await resolveRemoteOauthTicket(baseUrl, remoteHeaders, {
@@ -9589,7 +9605,7 @@ async function buildRemoteConnection(
       authMode: 'oauth',
       remoteHost: host || undefined,
       remoteIdentity,
-      remoteKind,
+      remoteKind: dialedKind,
       headers: remoteHeaders,
       // No static token in OAuth mode; REST is cookie-authed via the partition.
       token: null,
@@ -9615,7 +9631,7 @@ async function buildRemoteConnection(
     authMode: 'token',
     remoteHost: host || undefined,
     remoteIdentity,
-    remoteKind,
+    remoteKind: dialedKind,
     headers: remoteHeaders,
     token,
     wsUrl
@@ -9623,6 +9639,11 @@ async function buildRemoteConnection(
 }
 
 const sshConnections = new Map<string, any>()
+
+// Native iroh transport: tickets (stable pairing artifacts) own persistent
+// loopback tunnels; buildRemoteConnection dials through this manager when a
+// saved remote url uses the iroh:// scheme.
+const irohTunnels = createIrohTunnelManager(async () => Number(await pickLocalPort()), chunk => rememberLog(chunk))
 
 const sshIsolatedKeepalives = createSshIsolatedKeepaliveRegistry({
   log: chunk => sshRememberLog(chunk)

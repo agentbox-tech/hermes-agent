@@ -51,6 +51,25 @@ function normalizeRemoteBaseUrl(rawUrl) {
     throw new Error('Remote gateway URL is required.')
   }
 
+  // iroh remotes: `iroh://<ticket>` (or a bare base32 ticket pasted straight
+  // in). Canonicalized WITHOUT URL parsing — the ticket is opaque pairing
+  // material, not a host, and http:// prefixing would mangle it. The scheme
+  // survives persistence verbatim; the main process dials it through the
+  // native iroh transport (iroh-connection.ts) and hands the resolved
+  // http://127.0.0.1:<port> tunnel to everything downstream, which never
+  // sees the iroh URL again.
+  const irohSchemeMatch = /^iroh:\/\/(.+)$/i.exec(value)
+
+  if (irohSchemeMatch) {
+    return `iroh://${irohSchemeMatch[1].trim()}`
+  }
+
+  if (/^[a-z2-7]{60,}$/.test(value)) {
+    // Long base32-only strings cannot be hostnames in practice — accept a
+    // pasted ticket and give it its scheme.
+    return `iroh://${value}`
+  }
+
   // Users routinely paste scheme-less "host:port" (a Tailscale IP, a LAN
   // hostname). Without this, `new URL('100.64.0.1:9119')` either throws or —
   // worse — parses `host:` as the protocol and produces a baffling

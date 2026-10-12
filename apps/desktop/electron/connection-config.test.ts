@@ -1135,6 +1135,16 @@ test('normalizeRemoteBaseUrl preserves a path prefix', () => {
   assert.equal(normalizeRemoteBaseUrl('https://host/hermes'), 'https://host/hermes')
 })
 
+test('normalizeRemoteBaseUrl canonicalizes iroh tickets without URL parsing', () => {
+  const ticket =
+    'endpointadu2n5bd64n24e3jqrh2poctujp7uun3iiqgsshakmf3gqifp7a3sbabacwbakqb5csagaiayculeaxiuqbqcajkaaab7fufwaasmntgy2k2e4lvw2cqeaibfiaaah4wqwyadjtg5v5z6ult4s3ikaq'
+
+  assert.equal(normalizeRemoteBaseUrl(`iroh://${ticket}`), `iroh://${ticket}`)
+  assert.equal(normalizeRemoteBaseUrl(`IROH://${ticket}  `), `iroh://${ticket}`)
+  // Bare pasted ticket gets its scheme; it must never be http://-prefixed.
+  assert.equal(normalizeRemoteBaseUrl(ticket), `iroh://${ticket}`)
+})
+
 test('normalizeRemoteBaseUrl rejects empty input', () => {
   assert.throws(() => normalizeRemoteBaseUrl(''), /required/)
   assert.throws(() => normalizeRemoteBaseUrl('   '), /required/)

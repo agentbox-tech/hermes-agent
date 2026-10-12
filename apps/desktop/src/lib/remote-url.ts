@@ -14,7 +14,17 @@
 export function coerceRemoteUrlScheme(rawUrl: string): string {
   const value = String(rawUrl || '').trim()
 
-  if (!value || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+  if (!value) {
+    return value
+  }
+
+  // A pasted iroh ticket is base32-only and can never be a hostname; give it
+  // its scheme so main-process validation dials it over the native transport.
+  if (/^[a-z2-7]{60,}$/.test(value)) {
+    return `iroh://${value}`
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
     return value
   }
 

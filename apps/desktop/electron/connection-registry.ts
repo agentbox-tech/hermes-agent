@@ -245,7 +245,7 @@ export interface ResolvedConnectionDescriptor {
   mode?: 'local' | 'remote'
   org?: unknown
   remoteHost?: string
-  remoteKind?: 'cloud' | 'ssh' | 'url'
+  remoteKind?: 'cloud' | 'iroh' | 'ssh' | 'url'
   ssh?: ResolvedConnectionSshDescriptor
   token?: unknown
 }

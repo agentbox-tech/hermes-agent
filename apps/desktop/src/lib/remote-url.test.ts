@@ -22,4 +22,12 @@ describe('coerceRemoteUrlScheme', () => {
     expect(coerceRemoteUrlScheme('   ')).toBe('')
     expect(coerceRemoteUrlScheme('  host:9119  ')).toBe('http://host:9119')
   })
+
+  it('schemes pasted iroh tickets instead of http-prefixing them', () => {
+    const ticket =
+      'endpointadu2n5bd64n24e3jqrh2poctujp7uun3iiqgsshakmf3gqifp7a3sbabacwbakqb5csagaiayculeaxiuqbqcajkaaab7fufwaasmntgy2k2e4lvw2cqeaibfiaaah4wqwyadjtg5v5z6ult4s3ikaq'
+
+    expect(coerceRemoteUrlScheme(ticket)).toBe(`iroh://${ticket}`)
+    expect(coerceRemoteUrlScheme(`iroh://${ticket}`)).toBe(`iroh://${ticket}`)
+  })
 })

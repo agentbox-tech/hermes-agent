@@ -59,7 +59,13 @@ export function parseIrohTicket(value: unknown): string {
   // ([a-z2-7]), so stripping everything else is lossless for real tickets and
   // immune to paste noise (zero-width spaces, soft breaks, trailing colons,
   // smart-quote bytes) that macOS/clipboard paths inject into long strings.
-  const clean = ticket.replace(/[^a-z2-7]/g, '')
+  // A pasted ":<port>" suffix is a human habit from http URLs; iroh ignores
+  // ports (the ticket carries addresses) and its digits can be valid base32,
+  // so shave the suffix before the closed-set strip below. Whitespace and
+  // invisible chars are removed from EVERYWHERE first (real tickets have
+  // none) so a soft break before the ":port" can't defeat the anchor.
+  const inline = ticket.replace(/[\s\u200b-\u200d\u2060\ufeff]/g, '')
+  const clean = inline.replace(/:[0-9]+$/, '').replace(/[^a-z2-7]/g, '')
 
   if (!clean) {
     throw new Error('iroh connections need a ticket (the "endpoint…" string from the remote box).')

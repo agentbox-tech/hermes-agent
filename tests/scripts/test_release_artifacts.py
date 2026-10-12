@@ -212,8 +212,13 @@ def test_candidate_publication_and_store_selection(tmp_path, monkeypatch, r2_ser
     assert puts == ['/hermes-releases/' + name for name in (
         'releases/darwin/stable/stable-mac.yml', 'releases/win32/stable/stable.appinstaller',
         'releases/termux/stable/dists/hermes-stable/Release', 'releases/termux/stable/dists/hermes-stable/InRelease')]
+    # Promotion materializes only feed legs and indexes; packages stay receipt-bound on R2.
     for item in manifest['files']:
-        assert (tmp_path / 'promote' / item['path']).read_bytes() == r2_server.store[f"releases/tag/{manifest['archive']}/{item['path']}"][0]
+        local = tmp_path / 'promote' / item['path']
+        if item['path'].endswith(artifacts.PACKAGE_SUFFIXES):
+            assert not local.exists(), item['path']
+        else:
+            assert local.read_bytes() == r2_server.store[f"releases/tag/{manifest['archive']}/{item['path']}"][0]
     descriptor = ET.fromstring(r2_server.store['releases/win32/stable/stable.appinstaller'][0])
     assert descriptor.attrib == {
         'Uri': base + '/releases/win32/stable/stable.appinstaller',

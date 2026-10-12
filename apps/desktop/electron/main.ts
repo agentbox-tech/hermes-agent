@@ -9643,7 +9643,7 @@ const sshConnections = new Map<string, any>()
 // Native iroh transport: tickets (stable pairing artifacts) own persistent
 // loopback tunnels; buildRemoteConnection dials through this manager when a
 // saved remote url uses the iroh:// scheme.
-const irohTunnels = createIrohTunnelManager(async () => Number(await pickLocalPort()), chunk => rememberLog(chunk))
+const irohTunnels = createIrohTunnelManager(chunk => rememberLog(chunk))
 
 const sshIsolatedKeepalives = createSshIsolatedKeepaliveRegistry({
   log: chunk => sshRememberLog(chunk)
@@ -10613,7 +10613,13 @@ async function probeRemoteAuthMode(rawUrl) {
   // OAuth login button vs a session-token entry box. Network/parse failures
   // surface as ``reachable: false`` rather than throwing, so a half-typed or
   // unreachable URL degrades to "can't tell yet" instead of a hard error.
-  const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+  // iroh remotes: bring the tunnel up first, then probe the loopback as plain
+  // http — the same pipe the test and the dial reuse (ensure is idempotent).
+  // A malformed/dial-failing ticket rejects here, exactly like a malformed URL
+  // always did: the renderer flips the probe to error and offers a force-test.
+  const baseUrl = isIrohUrl(String(rawUrl || ''))
+    ? (await irohTunnels.ensure(String(rawUrl))).baseUrl
+    : normalizeRemoteBaseUrl(rawUrl)
 
   let status
 
@@ -10772,7 +10778,11 @@ async function testDesktopConnectionConfig(input: any = {}) {
   let testHeaders = {}
 
   if (wantRemote && block?.url) {
-    baseUrl = normalizeRemoteBaseUrl(block.url)
+    // iroh remotes: test through the same tunnel the dial will use — resolve
+    // the ticket to its live loopback before any fetch/WS leg.
+    baseUrl = isIrohUrl(String(block.url))
+      ? (await irohTunnels.ensure(String(block.url))).baseUrl
+      : normalizeRemoteBaseUrl(block.url)
     authMode = normAuthMode(block.authMode)
     testHeaders = decryptRemoteHeaders(block.headers)
 
@@ -16804,7 +16814,13 @@ ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, ra
   //     check (existing compatibility)
   //   - a failed native login reports the error rather than auto-falling back
   //     to the embedded flow — one sign-in action opens at most one window.
-  const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+  // iroh remotes: sign in through the tunnel — the login window and its
+  // cookie jar must live on the exact loopback origin the dial will use
+  // (deterministic ports keep that origin stable across restarts).
+  const baseUrl = isIrohUrl(String(rawUrl || ''))
+    ? (await irohTunnels.ensure(String(rawUrl))).baseUrl
+    : normalizeRemoteBaseUrl(rawUrl)
+
   // Order login attempts without interrupting rotation of the existing session.
   const authIsCurrent: () => boolean = nativeAccessTokenCoordinator.beginLogin(baseUrl)
 

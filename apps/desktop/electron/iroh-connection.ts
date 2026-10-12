@@ -128,8 +128,9 @@ async function pipeSocketOverStream(socket: net.Socket, openStream: () => Promis
 
 /**
  * Ensure a live loopback tunnel for `connectionId` (re-dials the ticket when
- * the endpoint or connection has died). `pickPort` returns a free loopback
- * port; injected so tests run without binding sockets.
+ * the endpoint or connection has died). `pickPort` receives the ticket and
+ * returns loopback port CANDIDATES (first free wins); injected so tests run
+ * without binding sockets.
  */
 export async function ensureIrohTunnel(
   connectionId: string,
@@ -139,7 +140,7 @@ export async function ensureIrohTunnel(
     createServer: (onConnection: (socket: net.Socket) => void) => net.Server
     dial: (endpoint: IrohEndpoint, ticket: string) => Promise<Connection>
     log: (msg: string) => void
-    pickPort: () => Promise<number>
+    pickPort: (seed: string) => Promise<number[]>
     tunnels: Map<string, TunnelHandle>
   }
 ): Promise<IrohTunnel> {
@@ -156,7 +157,6 @@ export async function ensureIrohTunnel(
     deps.tunnels.delete(connectionId)
   }
 
-  const port = await deps.pickPort()
   const endpoint = await deps.bindEndpoint()
   let conn: null | Connection = null
 
@@ -178,7 +178,7 @@ export async function ensureIrohTunnel(
     return conn
   }
 
-  const server = net.createServer(socket => {
+  const handleConnection = (socket: net.Socket): void => {
     socket.on('error', () => {})
 
     dialOnce().then(conn =>
@@ -191,15 +191,48 @@ export async function ensureIrohTunnel(
       conn = null
       socket.destroy()
     })
-  })
+  }
 
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(port, '127.0.0.1', () => {
-      server.removeListener('error', reject)
-      resolve()
+  // Bind the first free candidate port. EADDRINUSE walks forward (the
+  // deterministic scheme can collide with a local service); any other listen
+  // error is fatal for this attempt.
+  const candidates = await deps.pickPort(ticket)
+  let port = 0
+  let server: null | net.Server = null
+
+  for (const candidate of candidates) {
+    const probe = deps.createServer(handleConnection)
+
+    const bound = await new Promise<boolean>((resolve, reject) => {
+      const onError = (err: Error): void => {
+        if ((err as { code?: string }).code === 'EADDRINUSE') {
+          resolve(false)
+        } else {
+          reject(err)
+        }
+      }
+
+      probe.once('error', onError)
+      probe.listen(candidate, '127.0.0.1', () => {
+        probe.removeListener('error', onError)
+        resolve(true)
+      })
     })
-  })
+
+    if (bound) {
+      server = probe
+      port = candidate
+
+      break
+    }
+
+    deps.log(`[iroh] loopback port ${candidate} busy, trying next`)
+  }
+
+  if (!server) {
+    await endpoint.close().catch(() => {})
+    throw new Error('[iroh] no free loopback port for tunnel')
+  }
 
   const tunnel: IrohTunnel = {
     connectionId,
@@ -223,8 +256,32 @@ export async function ensureIrohTunnel(
 /**
  * Process-level tunnel manager used by main.ts: tickets are stable pairing
  * artifacts, so tunnels are keyed by ticket. One manager, many tickets.
+ *
+ * Cookie-backed sessions (dashboard basic auth) are scoped to the exact
+ * loopback origin, so ports must be STABLE across app restarts — an
+ * ephemeral pick would silently log the user out every launch. Candidates
+ * derive from the ticket and walk forward on collision.
  */
-export function createIrohTunnelManager(pickPort: () => Promise<number>, log: (msg: string) => void = () => {}) {
+export const LOOPBACK_PORT_BASE = 19100
+export const LOOPBACK_PORT_SPAN = 400
+export const LOOPBACK_PORT_TRIES = 20
+
+export function deterministicLoopbackPorts(seed: string): number[] {
+  let h = 0
+
+  for (let i = 0; i < seed.length; i++) {
+    h = (h * 31 + seed.charCodeAt(i)) | 0
+  }
+
+  const start = LOOPBACK_PORT_BASE + Math.abs(h) % LOOPBACK_PORT_SPAN
+
+  return Array.from({ length: LOOPBACK_PORT_TRIES }, (_, i) => start + i)
+}
+
+export function createIrohTunnelManager(
+  log: (msg: string) => void = () => {},
+  pickPort: (seed: string) => Promise<number[]> = async seed => deterministicLoopbackPorts(seed)
+) {
   const tunnels = new Map<string, TunnelHandle>()
 
   return {

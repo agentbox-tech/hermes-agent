@@ -4,10 +4,14 @@ import net from 'node:net'
 import { describe, it } from 'vitest'
 
 import {
+  deterministicLoopbackPorts,
   ensureIrohTunnel,
   IROH_SCHEME,
   type IrohTunnel,
   isIrohUrl,
+  LOOPBACK_PORT_BASE,
+  LOOPBACK_PORT_SPAN,
+  LOOPBACK_PORT_TRIES,
   normalizeIrohUrl,
   parseIrohTicket
 } from './iroh-connection'
@@ -84,7 +88,7 @@ function makeDeps(tunnels: Map<string, any>, counters: FakeCounters): any {
       const port = 20000 + counters.ports.length
       counters.ports.push(port)
 
-      return port
+      return [port]
     },
     tunnels
   }
@@ -131,5 +135,56 @@ describe('ensureIrohTunnel', () => {
     assert.equal(counters.bound, 2)
     assert.equal(counters.ports.length, 2)
     await second.teardown()
+  })
+
+  it('walks to the next candidate when the first port is busy', async () => {
+    const tunnels = new Map<string, any>()
+    const boundPorts: number[] = []
+
+    const deps = {
+      bindEndpoint: async () => ({ close: async () => {} }),
+      createServer: (onConnection: (socket: net.Socket) => void) => {
+        const server = new net.Server()
+        server.on('connection', onConnection)
+
+        return server
+      },
+      dial: async () => ({
+        close: () => {},
+        closeReason: () => null,
+        openBi: async () => ({
+          recv: { read: async () => [] as number[] },
+          send: { finish: async () => {}, reset: () => {}, writeAll: async () => {} }
+        }),
+        remoteId: () => ({ fmtShort: () => 'fake0short' })
+      }),
+      log: () => {},
+      // first candidate is taken by a live competitor; second must win
+      pickPort: async () => {
+        const busy = new net.Server()
+        await new Promise<void>(resolve => busy.listen(21500, '127.0.0.1', resolve))
+
+        return [21500, 21501]
+      },
+      tunnels
+    }
+
+    const tunnel = await ensureIrohTunnel('conn-iroh-1', `${IROH_SCHEME}${TICKET}`, deps as any)
+
+    assert.equal(tunnel.port, 21501)
+    await tunnel.teardown()
+  })
+})
+
+describe('deterministicLoopbackPorts', () => {
+  it('is stable per seed, in range, and walks forward', () => {
+    const a = deterministicLoopbackPorts('ticket-abc')
+    const b = deterministicLoopbackPorts('ticket-abc')
+
+    assert.deepEqual(a, b)
+    assert.equal(a.length, LOOPBACK_PORT_TRIES)
+    assert.ok(a[0]! >= LOOPBACK_PORT_BASE && a[0]! < LOOPBACK_PORT_BASE + LOOPBACK_PORT_SPAN)
+    assert.equal(a[1]! - a[0]!, 1)
+    assert.notDeepEqual(a, deterministicLoopbackPorts('ticket-xyz'))
   })
 })

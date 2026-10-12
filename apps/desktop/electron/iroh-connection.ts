@@ -56,11 +56,16 @@ export function parseIrohTicket(value: unknown): string {
   }
 
   // Fail fast on garbage: the binding parses strictly and a malformed ticket
-  // should surface at save time, not as a dial timeout later.
+  // should surface at save time, not as a dial timeout later. The binding's
+  // own message is appended verbatim — a missing platform binary
+  // ("...not installed on this platform") looks identical to a bad ticket
+  // from the outside and must be distinguishable in the error toast.
   try {
     binding().EndpointTicket.fromString(ticket)
-  } catch {
-    throw new Error(`Not a valid iroh ticket: "${ticket.slice(0, 24)}…"`)
+  } catch (err: any) {
+    const reason = String(err?.message ?? err).replace(/^Error:\s*/i, '')
+
+    throw new Error(`Not a valid iroh ticket: "${ticket.slice(0, 24)}…" (${reason})`)
   }
 
   return ticket

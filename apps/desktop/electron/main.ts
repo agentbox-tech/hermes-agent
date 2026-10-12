@@ -10617,9 +10617,30 @@ async function probeRemoteAuthMode(rawUrl) {
   // http — the same pipe the test and the dial reuse (ensure is idempotent).
   // A malformed/dial-failing ticket rejects here, exactly like a malformed URL
   // always did: the renderer flips the probe to error and offers a force-test.
-  const baseUrl = isIrohUrl(String(rawUrl || ''))
-    ? (await irohTunnels.ensure(String(rawUrl))).baseUrl
-    : normalizeRemoteBaseUrl(rawUrl)
+  //
+  // Breadcrumb BEFORE ensure: the tunnel can fail outside the fetch try/catch
+  // below (native binding load in the packaged app, ticket parse, endpoint
+  // bind). A silent IPC reject otherwise leaves the UI stuck on "gateway
+  // incomplete" with zero clue. These lines prove the probe fired AND name the
+  // cause — the failure mode we could not previously distinguish remotely.
+  let baseUrl
+
+  if (isIrohUrl(String(rawUrl || ''))) {
+    rememberLog(`[iroh] probe: resolving tunnel for ${String(rawUrl).slice(0, 48)}…`)
+
+    try {
+      const tunnel = await irohTunnels.ensure(String(rawUrl))
+
+      rememberLog(`[iroh] probe: tunnel live at ${tunnel.baseUrl}`)
+      baseUrl = tunnel.baseUrl
+    } catch (err: any) {
+      rememberLog(`[iroh] probe: tunnel ensure FAILED: ${String(err?.stack ?? err?.message ?? err)}`)
+
+      throw err
+    }
+  } else {
+    baseUrl = normalizeRemoteBaseUrl(rawUrl)
+  }
 
   let status
 

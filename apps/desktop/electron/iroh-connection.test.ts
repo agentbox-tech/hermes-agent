@@ -7,6 +7,7 @@ import {
   deterministicLoopbackPorts,
   ensureIrohTunnel,
   IROH_SCHEME,
+  IROH_SPECS,
   type IrohTunnel,
   isIrohUrl,
   LOOPBACK_PORT_BASE,
@@ -58,6 +59,16 @@ describe('normalizeIrohUrl', () => {
   it('canonicalizes both input shapes to scheme + ticket', () => {
     assert.equal(normalizeIrohUrl(`${IROH_SCHEME}${TICKET}`), `${IROH_SCHEME}${TICKET}`)
     assert.equal(normalizeIrohUrl(` ${TICKET} `), `${IROH_SCHEME}${TICKET}`)
+  })
+})
+
+describe('IROH_SPECS', () => {
+  it('tries the real-file subpath BEFORE the bare specifier', () => {
+    // Regression guard: @number0/iroh@1.1.0 has a broken `main` ("iroh-js/index.js",
+    // non-existent). The packaged app only loads if the subpath (root index.js) is
+    // attempted first — reverting to bare-only reintroduces MODULE_NOT_FOUND.
+    assert.equal(IROH_SPECS[0], '@number0/iroh/index.js')
+    assert.ok(IROH_SPECS.includes('@number0/iroh'))
   })
 })
 

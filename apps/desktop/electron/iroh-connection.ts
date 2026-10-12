@@ -33,9 +33,35 @@ const irohRequire = nodeCreateRequire(import.meta.url)
 
 let irohBinding: null | typeof IrohNative = null
 
+// @number0/iroh@1.1.0 ships a BROKEN entry: its package.json `main` points at
+// "iroh-js/index.js", but the published tarball has NO iroh-js/ directory — the
+// real file sits at the package ROOT ("index.js"). Bare node tolerates this via
+// the deprecated DEP0128 main-fallback (loads root index.js with a warning), but
+// packaged Electron takes `main` literally and throws MODULE_NOT_FOUND — which
+// surfaced as `Cannot find module '@number0/iroh'` inside the packaged .app while
+// the same require worked from a bare-node CLI. Requiring the REAL file by
+// subpath bypasses the broken `main` (the package ships no `exports` map, so the
+// subpath is freely requireable). Fall back to the bare specifier so this keeps
+// working if upstream ever repairs the entry, and surface the last load error.
+export const IROH_SPECS = ['@number0/iroh/index.js', '@number0/iroh'] as const
+
 function binding(): typeof IrohNative {
   if (!irohBinding) {
-    irohBinding = irohRequire('@number0/iroh') as typeof IrohNative
+    let lastErr: unknown = null
+
+    for (const spec of IROH_SPECS) {
+      try {
+        irohBinding = irohRequire(spec) as typeof IrohNative
+
+        return irohBinding
+      } catch (err) {
+        lastErr = err
+      }
+    }
+
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error(`failed to load iroh native binding: ${String(lastErr)}`)
   }
 
   return irohBinding

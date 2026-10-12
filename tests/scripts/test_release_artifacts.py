@@ -237,7 +237,9 @@ def test_candidate_publication_and_store_selection(tmp_path, monkeypatch, r2_ser
     r2_server.corrupt_put = None
     r2_server.store[pointer] = original
     before = dict(r2_server.store)
-    r2_server.store[f"releases/tag/{manifest['archive']}/Product-win.msixbundle"] = (b'corrupt', '"e"')
+    # Packages are receipt-bound and never re-downloaded here; a corrupt file that
+    # promotion does materialize (a feed leg) is still refused before any write.
+    r2_server.store[f"releases/tag/{manifest['archive']}/arm64-stable-mac.yml"] = (b'corrupt', '"e"')
     r2_server.requests.clear()
     with pytest.raises(ValueError, match='digest mismatch'):
         artifacts.promote(manifest, tmp_path / 'broken', base)

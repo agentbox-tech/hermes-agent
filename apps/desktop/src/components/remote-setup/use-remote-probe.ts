@@ -57,7 +57,11 @@ export function useRemoteProbe({ enabled, url, revision, onResult, onReset }: Re
     setProbeStatus('idle')
     callbacks.current.onReset()
 
-    if (!enabled || !/^https?:\/\//i.test(url) || !window.hermesDesktop?.probeConnectionConfig) {
+    // iroh:// urls are probeable too: main resolves the ticket to its live
+    // loopback tunnel before fetching, so the probe speaks plain http behind
+    // the pipe. Without letting the scheme through, auth mode never resolves
+    // and the save gate sits on "Remote gateway incomplete" forever.
+    if (!enabled || !/^(https?|iroh):\/\//i.test(url) || !window.hermesDesktop?.probeConnectionConfig) {
       return cancel
     }
 

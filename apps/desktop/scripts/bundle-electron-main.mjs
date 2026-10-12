@@ -59,7 +59,7 @@ export async function bundleElectronMain({ source, out, stamp, dev = false }) {
     bundle: true,
     platform: 'node',
     target: 'node20',
-    external: ['electron', 'node-pty', 'get-windows', 'fs', '@number0/iroh'],
+    external: ['electron', 'node-pty', 'get-windows', 'fs', '@number0/iroh', '@number0/iroh/index.js'],
     define,
     logLevel: 'info',
   }

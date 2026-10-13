@@ -37,37 +37,46 @@ dogfood run off the tagged base. Do not "fix" this by rebasing onto main.
   running" FFI error — which is why the reference bridge silently ran
   STATIC tickets). Connector now polls `endpoint.addr()` every 60s.
 
-## The shape for pxl dogfood (decided, not open)
+## The dogfood target: box0, native (Rain, 2026-10-13 — pxl stays untouched, fragile)
 
-PyPI `iroh` ships **no musllinux wheel** (verified against the 1.1.0
-release: macos/glibc-Linux/windows only). pxl is musl. Therefore the serve
-process runs in a glibc container running the *real* hermes CLI, loading
-the *real* plugin through real discovery — container is an OS shim, the
-seam stays completely faithful. (Node has musl prebuilds; Python doesn't.
-A native-musl Node sidecar stays a possible later optimization, not now.)
+pxl is production and fragile right now — **no new subsystems land there
+while it's settling**. The pxl container shape below is parked, not
+abandoned; nothing new was installed on pxl for this effort (tonight's
+serve container was removed after its proof).
 
-## Gaps, in build order (→ Grist dogfood task)
+**box0 is the target** (`rain@192.168.178.42`, Fedora, x86_64, glibc 2.43,
+Python 3.14, podman, 342G free): `pip install iroh==1.1.0` is a NATIVE
+manylinux_2_28 wheel there — no container shim, no sidecar. Dogfood =
+clone fork → venv → `hermes remote serve` → dial. Gaps 3–5 from the old
+pxl plan evaporate; what remains is the code, not the scaffolding.
+
+## Gaps, in build order (→ Grist dogfood task #112)
 
 1. `__init__.py` exposing `register(ctx)` in the plugin repo (discovery
    requirement; `provides_remote_connectors` manifest key warns-but-loads —
    verified in `plugins_manifest.py`, becomes a known field in the seam PR).
 2. Implement `IrohConnector.connect()` (currently honest
-   `NotImplementedError`) — without it there is no full pxl loop and no
+   `NotImplementedError`) — without it there is no full loop and no
    headless dialer, ever.
-3. Runtime Dockerfile: `python:3.12-slim` + seam checkout +
-   `pip install iroh==1.1.0` + plugin; CMD
-   `hermes remote serve --scheme iroh --gateway-url http://127.0.0.1:9119`.
-   Build via podman on pxl (bridge:0.1 is the base precedent).
-4. Home isolation: container gets `HERMES_HOME=~/.hermes/iroh-seam` mount
-   (plugin, key, ticket). Never mount live `~/.hermes`.
-5. Enablement: confirm/default the enabled-plugins store in the dogfood home.
+3. Fork checkout on box0: clone `agentbox-tech/hermes-agent` @
+   `feat/remote-connector-seam-0.21.7`, venv, `pip install -e .` +
+   `pip install iroh==1.1.0` (NATIVE wheel — glibc 2.43 ✔). Clone is
+   blobless-friendly; box0 has bandwidth and 342G.
+4. Install the plugin: `~/.hermes/plugins/iroh-connector/` (git clone of
+   `agentbox-tech/hermes-iroh-connector` IS the plugin dir) + confirm the
+   enabled-plugins store default for fresh directories.
+5. A target to wrap: box0 has no gateway on :9119 (only litellm :4000).
+   Run `hermes gateway` on box0 (its own MyAgent stack) — or, for a pure
+   seam test, any local HTTP service; the connector doesn't know the
+   difference.
 6. Relay proof: force relay-only dial so traffic demonstrably traverses
-   relay.agentbox.tech — tonight's 26ms was almost certainly direct LAN.
-7. Durability trio: quadlet unit (survive reboot), pulse (endpoint alive +
-   ticket fresh), Grist task until boring. Today's serve container has
-   none — it dies at the next reboot.
-8. NOT dogfoodable on pxl (headless): the desktop loader half. That leg
-   runs on the Mac/box0: stage the tarball
+   relay.agentbox.tech — pxl's 26ms round-trip was almost certainly direct
+   LAN.
+7. Durability: box0 dogfood is deliberately ephemeral (test box) — board
+   task + notes are the record; no quadlet unless it graduates to
+   something long-lived. pxl stays untouched throughout.
+8. NOT dogfoodable on either server box (both headless): the desktop
+   loader half. That leg runs on the Mac: stage the tarball
    (`connectors/iroh/<ver>/iroh-connector-<ver>-<platform>.tar.gz`,
    napi per-platform prebuilds packed from npm — no compiling; published to
    dl.agentbox.tech, install = folder-drop + ⌘K "Reload desktop plugins").

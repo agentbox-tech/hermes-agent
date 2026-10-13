@@ -731,6 +731,32 @@ class PluginContext:
         logger.debug("Plugin '%s' registered memory provider: %s", self.manifest.name,
                      getattr(provider, "name", "?"))
 
+    def register_remote_connector(self, connector) -> Optional[PluginRegistration]:
+        """Register a :class:`gateway.remote_connectors.RemoteConnector` — a transport
+        owning ``<scheme>://`` dispatch for remote gateway connections (serve/accept
+        side plus optional dial side). Wrong type warns and is ignored; duplicate or
+        built-in schemes raise at the registry and are warned-and-ignored here, never
+        propagated into the plugin's ``register()``. The teardown handle is
+        ``persistent=True``: a connector's access points outlive per-home manager
+        teardown (the #91701 lesson — process-lifetime registries must not empty when
+        a routine profile-scoped manager is released)."""
+        from gateway.remote_connectors import (
+            RemoteConnector,
+            register_remote_connector as _register,
+            unregister_remote_connector as _unregister,
+        )
+        if self._wrong_type(connector, RemoteConnector, "remote connector"):
+            return None
+        try:
+            _register(connector)
+        except ValueError as exc:
+            logger.warning("Plugin '%s' remote-connector registration failed: %s", self.manifest.name, exc)
+            return None
+        scheme = connector.scheme
+        handle = self._track("remote_connector", scheme, lambda: _unregister(scheme), persistent=True)
+        logger.info("Plugin '%s' registered remote connector: %s://", self.manifest.name, scheme)
+        return handle
+
     @_serialized_replacement
     def register_dashboard_auth_provider(self, provider) -> Optional[PluginRegistration]:
         """Register a :class:`hermes_cli.dashboard_auth.DashboardAuthProvider` for the dashboard

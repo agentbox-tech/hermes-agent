@@ -80,9 +80,31 @@ async def main():
     # relay hints change every bind, so pasted/static copies go stale on
     # reboot. The client reads this file at startup (see '@' arg form).
     try:
-        (KEYFILE.parent / "iroh-ticket.txt").write_text(ticket)
+        (KEYFILE.parent / "iroh-ticket.txt").write_text(ticket, encoding="utf-8")
     except OSError as e:
         print(f"ticket file write failed: {e}", flush=True)
+    # Stable identity: persist the endpoint id next to the secret key —
+    # clients pair by id once; tickets are disposable dial hints around it.
+    try:
+        (KEYFILE.parent / "iroh-endpoint-id.txt").write_text(str(ep.id()), encoding="utf-8")
+    except OSError:
+        pass
+
+    def write_ticket(addr):
+        (KEYFILE.parent / "iroh-ticket.txt").write_text(
+            str(iroh.EndpointTicket.from_addr(addr)))
+
+    async def announce():
+        # Tickets embed relay hints that go stale across binds — rewrite a
+        # fresh one whenever the endpoint's addresses change so any surface
+        # serving this file (CLI, API, portal) always hands out a live one.
+        try:
+            ep.watch_addr(write_ticket)
+            write_ticket(ep.addr())
+        except Exception as e:
+            print(f"ticket announce stopped: {e}", flush=True)
+
+    await announce()
     print(f"bridging iroh -> {TARGET_HOST}:{TARGET_PORT}", flush=True)
     while True:
         incoming = await ep.accept_next()

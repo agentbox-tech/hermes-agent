@@ -180,6 +180,13 @@ import {
   withTransientRetries
 } from './connection-config'
 import { applyConnectionConfigAtomically } from './connection-config-apply'
+import { DESKTOP_PLUGINS_DIR } from './desktop-plugins-root'
+import { loadRemoteConnectors } from './remote-connector-loader'
+import {
+  connectorHostLabel,
+  createConnectorRegistry,
+  type ConnectorSummary
+} from './remote-connector-registry'
 import {
   backendScopeKey,
   backendScopePrefix,
@@ -9565,12 +9572,22 @@ async function buildRemoteConnection(
   remoteIdentity?,
   headers?
 ) {
-  const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+  // Remote gateway connectors: a saved url whose scheme is claimed by an
+  // installed connector resolves to a live loopback access point BEFORE any
+  // http happens — from here on the connection is indistinguishable from a
+  // plain url remote (fetch, WS upgrade, token adoption and revalidation all
+  // ride the pipe unaware). https and unclaimed urls return null here and
+  // their path is byte-for-byte unchanged.
+  const dialed = await remoteConnectors.ensure(rawUrl, rememberLog)
+  const baseUrl = normalizeRemoteBaseUrl(dialed ? dialed.baseUrl : rawUrl)
   const remoteHeaders = decryptRemoteHeaders(headers)
   // For token/oauth remotes the meaningful host is the real backend URL; for
   // SSH remotes the caller passes the entered/resolved host explicitly (the
   // baseUrl is a 127.0.0.1 tunnel and would be useless in the pill).
-  const host = remoteHost || hostLabelFromBaseUrl(baseUrl)
+  // Connector-backed remotes get the connector's own label, or a generic
+  // `<scheme>:<target>` — a loopback address would be as useless here as it
+  // is for SSH.
+  const host = remoteHost || (dialed ? dialed.hostLabel || connectorHostLabel(rawUrl) : hostLabelFromBaseUrl(baseUrl))
 
   if (authMode === 'oauth') {
     const ticket = await resolveRemoteOauthTicket(baseUrl, remoteHeaders, {
@@ -9627,6 +9644,36 @@ const sshConnections = new Map<string, any>()
 const sshIsolatedKeepalives = createSshIsolatedKeepaliveRegistry({
   log: chunk => sshRememberLog(chunk)
 })
+
+// Remote gateway connectors: scheme-claiming transports contributed by
+// desktop plugins (`<desktop-plugins>/…/connector.mjs`). This registry is
+// the ONLY place the app learns a URL scheme exists — plain https remotes
+// never touch it (their code path is byte-for-byte unchanged). Connector
+// enable/disable state lives in the renderer's plugins store (localStorage);
+// the renderer mirrors it here via `hermes:remote-connectors-decisions`.
+const remoteConnectors = createConnectorRegistry({
+  connectors: [],
+  normalizeHttp: normalizeRemoteBaseUrl,
+  log: chunk => rememberLog(chunk)
+})
+
+/** (Re)discover connectors in the desktop-plugins root and hot-swap them
+ * into the registry. Surviving connectors keep their live pipes (a toggle
+ * of one plugin must not drop another remote). */
+async function refreshRemoteConnectors(decisions: Record<string, boolean> = {}): Promise<ConnectorSummary[]> {
+  const { connectors, issues } = await loadRemoteConnectors({
+    root: path.join(HERMES_HOME, DESKTOP_PLUGINS_DIR),
+    isEnabled: id => decisions[id] !== false,
+    log: chunk => rememberLog(chunk)
+  })
+
+  await remoteConnectors.reseed(connectors)
+  rememberLog(
+    `[connectors] live: ${connectors.map(c => `${c.id} (${c.scheme}://)`).join(', ') || 'none'}${issues.length ? `; ${issues.length} issue(s)` : ''}`
+  )
+
+  return remoteConnectors.list()
+}
 
 const desktopInstallationId = loadOrCreateInstallationId(DESKTOP_INSTALLATION_PATH)
 
@@ -10592,7 +10639,23 @@ async function probeRemoteAuthMode(rawUrl) {
   // OAuth login button vs a session-token entry box. Network/parse failures
   // surface as ``reachable: false`` rather than throwing, so a half-typed or
   // unreachable URL degrades to "can't tell yet" instead of a hard error.
-  const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+  //
+  // Remote gateway connectors: bring the access point up first and probe the
+  // loopback as plain http — the same pipe the test and the dial reuse
+  // (ensure is idempotent). Plain https falls straight through untouched; an
+  // unclaimed scheme rejects with a named UnsupportedSchemeError ("install a
+  // connector for `x://`") instead of a baffling URL parse error.
+  let baseUrl: string
+
+  try {
+    const dialed = await remoteConnectors.ensure(rawUrl, rememberLog)
+
+    baseUrl = normalizeRemoteBaseUrl(dialed ? dialed.baseUrl : rawUrl)
+  } catch (err) {
+    rememberLog(`[connectors] probe: access point failed: ${String((err as Error)?.message ?? err)}`)
+
+    throw err
+  }
 
   let status
 
@@ -10751,7 +10814,11 @@ async function testDesktopConnectionConfig(input: any = {}) {
   let testHeaders = {}
 
   if (wantRemote && block?.url) {
-    baseUrl = normalizeRemoteBaseUrl(block.url)
+    // Connector-scheme urls dial through their connector's access point
+    // first; https is the unchanged core path.
+    const dialed = await remoteConnectors.ensure(block.url, rememberLog)
+
+    baseUrl = normalizeRemoteBaseUrl(dialed ? dialed.baseUrl : block.url)
     authMode = normAuthMode(block.authMode)
     testHeaders = decryptRemoteHeaders(block.headers)
 
@@ -16113,6 +16180,17 @@ ipcMain.handle('hermes:ssh-config:resolve', async (_event, host) => {
 })
 ipcMain.handle('hermes:connection-config:test', async (_event, payload) => testDesktopConnectionConfig(payload))
 
+// Remote gateway connectors (remote-connector-registry.ts): the renderer
+// asks the registry which schemes exist (Add-Connection hints) and whether a
+// pasted url is dialable (probe gate) — no scheme vocabulary lives there.
+// `decisions` mirrors the renderer plugins store (localStorage) so a
+// Settings → Plugins toggle takes effect in the main process too.
+ipcMain.handle('hermes:remote-connectors:list', () => remoteConnectors.list())
+ipcMain.handle('hermes:remote-connectors-accepts', (_event, rawUrl) => remoteConnectors.accepts(rawUrl))
+ipcMain.handle('hermes:remote-connectors-decisions', (_event, decisions) =>
+  refreshRemoteConnectors(decisions && typeof decisions === 'object' ? (decisions as Record<string, boolean>) : {})
+)
+
 // ── Opt-in keychain encryption for stored secrets ───────────────────────────
 // get returns the current policy without touching safeStorage; set flips it
 // and re-encodes every stored secret (see applySecretStorageEncryption).
@@ -16783,7 +16861,11 @@ ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, ra
   //     check (existing compatibility)
   //   - a failed native login reports the error rather than auto-falling back
   //     to the embedded flow — one sign-in action opens at most one window.
-  const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+  // Connector-backed remotes sign in through the access point — the login
+  // window and its cookie jar must live on the exact loopback origin the
+  // dial will use (stable ports keep that origin stable across restarts).
+  const dialedLogin = await remoteConnectors.ensure(rawUrl, rememberLog)
+  const baseUrl = normalizeRemoteBaseUrl(dialedLogin ? dialedLogin.baseUrl : rawUrl)
   // Order login attempts without interrupting rotation of the existing session.
   const authIsCurrent: () => boolean = nativeAccessTokenCoordinator.beginLogin(baseUrl)
 
@@ -18178,6 +18260,10 @@ app.on('before-quit', () => {
 app.on('will-quit', () => {
   killTimedGitChildren()
   sshIsolatedKeepalives.stopAll()
+  // Release every connector access point (loopback listeners + whatever the
+  // connector itself holds). Fire-and-await-off-loop: quit finalization must
+  // not block on a wedged transport, and each teardown swallows its errors.
+  void remoteConnectors.teardownAll().catch(() => {})
   destroyKeepaliveAgents()
   nativeNotifications.dispose()
   quitFinalization.arm()
@@ -19323,6 +19409,14 @@ app.whenReady().then(() => {
   // Warm the login-shell PATH resolution immediately so it usually completes
   // before the backend start path awaits the same single-flight promise.
   void ensureLoginShellPath()
+
+  // Discover remote gateway connectors early so a saved `iroh://…`-style
+  // connection can dial on first connect without waiting on UI init. The
+  // renderer re-pushes enable/disable decisions when its plugins store
+  // hydrates; until then every connector folder is live (default-enabled).
+  void refreshRemoteConnectors().catch(err =>
+    rememberLog(`[connectors] startup discovery failed: ${String((err as Error)?.message ?? err)}`)
+  )
 
   if (CRASH_DIAGNOSTICS) {
     startChromiumLogWatcher(CHROMIUM_LOG_PATH)

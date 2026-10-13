@@ -668,6 +668,16 @@ async function awaitProfileActivation(
 }
 
 export const host = {
+  /**
+   * Remote gateway connectors (main-process scheme registry): the installed
+   * transports a connection UI can offer (`[{ id, scheme, hint }]`). Core
+   * https remotes are not listed — they need no connector. Feature-detect:
+   * older desktops return an empty list, not an error.
+   */
+  remoteConnectors: {
+    list: async (): Promise<Array<{ id: string; scheme: string; hint?: string }>> =>
+      (await window.hermesDesktop?.remoteConnectors?.list?.()) ?? []
+  },
   state: {
     /** Runtime id of the active chat session (null on a fresh draft). */
     activeSessionId: readonlyAtom<null | string>($activeSessionId),

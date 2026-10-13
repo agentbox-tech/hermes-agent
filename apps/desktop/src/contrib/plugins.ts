@@ -15,7 +15,7 @@
 
 import { trackGatewayEventDisposers } from './events'
 import { createPluginContext, type HermesPlugin } from './plugin'
-import { pluginActive, publishPlugin } from './plugins-store'
+import { $pluginDecisions, pluginActive, publishPlugin } from './plugins-store'
 import { watchRuntimePlugins } from './runtime-loader'
 
 const modules = import.meta.glob<{ default: HermesPlugin }>('../plugins/*/plugin.{js,ts,tsx}', { eager: true })
@@ -85,4 +85,9 @@ export function discoverBundledPlugins(): void {
   // The SELF-MAINTAINING disk door (fs-watched hot reloads, slow folder
   // reconciliation) — the runtime loader pipeline's real, shipping consumer.
   watchRuntimePlugins()
+
+  // Push the hydrated enable/disable decisions into the main-process
+  // connector registry once, so startup honors persisted toggles (before
+  // this, main's discovery defaulted every connector folder enabled).
+  void window.hermesDesktop?.remoteConnectors?.setDecisions?.($pluginDecisions.get())?.catch?.(() => {})
 }

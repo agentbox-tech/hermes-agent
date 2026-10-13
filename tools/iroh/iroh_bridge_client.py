@@ -4,13 +4,19 @@ remote iroh bridge for every connection, piping bytes both ways.
 Run on the machine with the browser: `python iroh_bridge_client.py <ticket> [port]`
 then open http://127.0.0.1:<port>
 """
-import asyncio, sys
+import asyncio, pathlib, sys
 
 import iroh
 
 ALPN = b"hermes-http/0"
 LOCAL_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9119
-TICKET = sys.argv[1]
+TICKET_ARG = sys.argv[1]
+# '@path' reads the ticket from a file the bridge rewrites on every bind —
+# relay hints go stale across restarts, a static paste would break on reboot.
+if TICKET_ARG.startswith('@'):
+    TICKET = pathlib.Path(TICKET_ARG[1:]).read_text().strip()
+else:
+    TICKET = TICKET_ARG
 READ_CHUNK = 64 * 1024
 
 

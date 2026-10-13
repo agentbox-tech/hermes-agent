@@ -7,6 +7,7 @@ will fold into web_server config once proven.
 import asyncio, pathlib, sys
 
 import iroh
+from iroh import iroh_ffi  # type: ignore[attr-defined]  # dynamically attached submodule
 
 TARGET_HOST, TARGET_PORT = "127.0.0.1", 9119
 ALPN = b"hermes-http/0"
@@ -25,7 +26,15 @@ def load_secret_key() -> bytes:
 
 
 async def pipe_stream(stream):
-    target_reader, target_writer = await asyncio.open_connection(TARGET_HOST, TARGET_PORT)
+    try:
+        target_reader, target_writer = await asyncio.open_connection(TARGET_HOST, TARGET_PORT)
+    except Exception as e:
+        print(f"pipe: cannot reach {TARGET_HOST}:{TARGET_PORT}: {e}", flush=True)
+        try:
+            await stream.send.reset(0)
+        except Exception:
+            pass
+        return
     rs, ss = stream.recv(), stream.send()
 
     async def iroh_to_tcp():
@@ -38,6 +47,10 @@ async def pipe_stream(stream):
                 await target_writer.drain()
         finally:
             target_writer.close()
+            try:
+                await target_writer.wait_closed()
+            except Exception:
+                pass
 
     async def tcp_to_iroh():
         try:
@@ -61,18 +74,38 @@ async def main():
     ep = await b.bind()
     addr = ep.addr()
     print("nodeid:", ep.id(), flush=True)
-    print("ticket:", iroh.EndpointTicket.from_addr(addr), flush=True)
+    ticket = str(iroh.EndpointTicket.from_addr(addr))  # type: ignore[attr-defined]
+    print("ticket:", ticket, flush=True)
+    # Share the fresh ticket with the client bridge via the mounted home:
+    # relay hints change every bind, so pasted/static copies go stale on
+    # reboot. The client reads this file at startup (see '@' arg form).
+    try:
+        (KEYFILE.parent / "iroh-ticket.txt").write_text(ticket)
+    except OSError as e:
+        print(f"ticket file write failed: {e}", flush=True)
     print(f"bridging iroh -> {TARGET_HOST}:{TARGET_PORT}", flush=True)
     while True:
         incoming = await ep.accept_next()
         if incoming is None:
+            print("endpoint closed; exiting", flush=True)
             break
-        acc = await incoming.accept()
-        conn = await acc.connect()
+        try:
+            acc = await incoming.accept()
+            conn = await acc.connect()
+        except iroh_ffi.IrohError as e:
+            print(f"accept failed: {e}", flush=True)
+            continue
 
         async def serve(conn=conn):
             while True:
-                stream = await conn.accept_bi()
+                try:
+                    stream = await conn.accept_bi()
+                except iroh_ffi.IrohError as e:
+                    # Normal end of a connection's stream intake (peer closed
+                    # or timed out) — must not escape as an unretrieved task
+                    # exception, or every disconnect spams the journal.
+                    print(f"connection closed: {e}", flush=True)
+                    return
                 asyncio.create_task(pipe_stream(stream))
 
         asyncio.create_task(serve())
